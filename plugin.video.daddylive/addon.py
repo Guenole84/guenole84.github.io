@@ -110,18 +110,21 @@ def _extract_credential(page, field):
 def _fetch_auth_credentials(channel_id):
     """Fetch fresh authToken and channelSalt from the ksohls.ru player page."""
     url = f'https://www.ksohls.ru/premiumtv/daddyhd.php?id={channel_id}'
-    try:
-        r = requests.get(url, headers={
-            'User-Agent': _AUTH_UA,
-            'Referer': 'https://dlhd.link/',
-        }, timeout=15)
-        auth_token = _extract_credential(r.text, 'authToken')
-        channel_salt = _extract_credential(r.text, 'channelSalt')
-        if auth_token and channel_salt:
-            return auth_token, channel_salt
-        log('[EPlayerAuth] Credentials not found in player page')
-    except Exception as e:
-        log(f'[EPlayerAuth] fetch error: {e}')
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers={
+                'User-Agent': _AUTH_UA,
+                'Referer': 'https://dlhd.link/',
+            }, timeout=15)
+            auth_token = _extract_credential(r.text, 'authToken')
+            channel_salt = _extract_credential(r.text, 'channelSalt')
+            if auth_token and channel_salt:
+                return auth_token, channel_salt
+            log(f'[EPlayerAuth] Credentials not found (attempt {attempt+1}/3), page snippet: {r.text[:200]}')
+        except Exception as e:
+            log(f'[EPlayerAuth] fetch error (attempt {attempt+1}/3): {e}')
+        if attempt < 2:
+            time.sleep(2)
     return None, None
 
 
@@ -183,29 +186,11 @@ class _EPlayerProxyHandler(BaseHTTPRequestHandler):
                 'X-Channel-Key': channel_key,
                 'X-User-Agent': _AUTH_UA,
             }
-            content = None
-            for attempt in range(4):
-                r = requests.get(state['m3u8_url'], headers=m3u8_hdrs, timeout=10)
-                candidate = r.text
-                segs = [l.strip() for l in candidate.splitlines()
-                        if l.strip() and not l.startswith('#')]
-                if segs:
-                    try:
-                        sr = requests.head(segs[0], headers={'User-Agent': _AUTH_UA}, timeout=3)
-                        seg_ok = sr.status_code == 200
-                    except Exception:
-                        seg_ok = False
-                    seq_m = re.search(r'MEDIA-SEQUENCE:(\d+)', candidate)
-                    seq = seq_m.group(1) if seq_m else '?'
-                    log(f'[EPlayerProxy] m3u8 attempt={attempt} seq={seq} seg_ok={seg_ok}')
-                    if seg_ok:
-                        content = candidate
-                        break
-                if attempt < 3:
-                    time.sleep(1)
-            if content is None:
-                content = r.text  # serve last fetch regardless
-                log('[EPlayerProxy] m3u8 all retries had stale segments, serving anyway')
+            r = requests.get(state['m3u8_url'], headers=m3u8_hdrs, timeout=10)
+            content = r.text
+            seq_m = re.search(r'MEDIA-SEQUENCE:(\d+)', content)
+            seq = seq_m.group(1) if seq_m else '?'
+            log(f'[EPlayerProxy] m3u8 fetched seq={seq} status={r.status_code}')
 
             port = M3U8_PROXY_PORT
 
