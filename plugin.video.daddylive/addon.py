@@ -391,24 +391,20 @@ def fetch_via_proxy(url, method='get', data=None, headers=None, use_cache=True):
                 log(f"[fetch_via_proxy] Old cache format found for {url}, refreshing")
 
     resp_text = ''
-    try:
-        if method.lower() == 'get':
-            resp = requests.get(RAILWAY_PROXY, headers=headers, params={'url': url}, timeout=15)
-        else:
-            resp = requests.post(RAILWAY_PROXY, headers=headers, data={'url': url}, timeout=15)
-        resp_text = resp.text
-    except Exception as e:
-        log(f"[fetch_via_proxy] Proxy fetch failed: {url} error={e}")
-
-    if _is_error_response(resp_text):
-        log(f"[fetch_via_proxy] Proxy unavailable, trying direct fetch for {url}")
+    direct_hdrs = {k: v for k, v in headers.items() if k != 'X-API-Key'}
+    for attempt in range(3):
         try:
-            direct_hdrs = {k: v for k, v in headers.items() if k != 'X-API-Key'}
             resp_text = requests.get(url, headers=direct_hdrs, timeout=15).text
-            log(f"[fetch_via_proxy] Direct fetch succeeded for {url}")
+            if not _is_error_response(resp_text):
+                log(f"[fetch_via_proxy] Direct fetch ok attempt={attempt} for {url}")
+                break
+            log(f"[fetch_via_proxy] Bad response attempt={attempt} for {url}: {resp_text[:80]}")
         except Exception as e:
-            log(f"[fetch_via_proxy] Direct fetch failed: {url} error={e}")
-            return ''
+            log(f"[fetch_via_proxy] Direct fetch failed attempt={attempt} for {url}: {e}")
+        if attempt < 2:
+            time.sleep(2)
+    if _is_error_response(resp_text):
+        return ''
 
     if should_cache and not _is_error_response(resp_text):
         cached[url] = {
@@ -645,6 +641,9 @@ def getSource(trData):
 
 def list_gen():
     chData = channels()
+    if not chData:
+        xbmcgui.Dialog().notification('DaddyLive v3', 'Impossible de charger les chaînes. Vérifiez votre connexion.', ICON, 5000)
+        log('[list_gen] channels() returned empty list')
     for c in chData:
         addDir(c[1], build_url({'mode': 'play', 'url': abs_url(c[0])}), False)
     closeDir()
