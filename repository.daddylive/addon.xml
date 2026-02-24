@@ -7,7 +7,7 @@
         <dir>
             <info compressed="false">https://guenole84.github.io/addons.xml</info>
             <checksum>https://guenole84.github.io/addons.xml.md5</checksum>
-            <datadir zip="true">https://guenole84.github.io/</datadir>
+            <datadir zip="true">https://raw.githubusercontent.com/Guenole84/guenole84.github.io/main/</datadir>
         </dir>
     </extension>
     <extension point="xbmc.addon.metadata">
