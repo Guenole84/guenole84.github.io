@@ -16,9 +16,13 @@ def make_zip(addon_id, version):
         for root, dirs, files in os.walk(addon_dir):
             dirs[:] = [d for d in dirs if d != '__pycache__']
             for file in files:
-                if file.endswith('.zip'):
+                if file.endswith(('.zip', '.html', '.old')):
                     continue
                 zf.write(os.path.join(root, file))
+    # Also copy zip to repo root for direct download
+    import shutil
+    if addon_id == 'plugin.video.daddylive':
+        shutil.copy(zip_path, os.path.basename(zip_path))
     print(f'  Created {zip_path}')
 
 def get_version(addon_id):
