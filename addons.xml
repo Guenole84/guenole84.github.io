@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <addons>
-<addon id="plugin.video.daddylive" name="daddylive v3" version="1.0.0" provider-name="Guenole84">
+<addon id="plugin.video.daddylive" name="DaddyLive v3" version="1.0.0" provider-name="Guenole84">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
         <import addon="script.module.requests" />
