@@ -86,6 +86,27 @@ def _compute_auth_sig(channel_key, channel_salt, key_id, ts, fp):
     return _hmac.new(channel_salt.encode(), msg.encode(), hashlib.sha256).hexdigest()[:16]
 
 
+def _xor_decode(arr, key):
+    return ''.join(chr(b ^ key) for b in arr)
+
+
+def _extract_credential(page, field):
+    """Extract a credential value supporting plain string or XOR-encoded formats."""
+    # Format 1: field: 'value'
+    m = re.search(rf"{field}\s*:\s*'([^']+)'", page)
+    if m:
+        return m.group(1)
+    # Format 2: field: _dec_XXXX(_init_YYYY, key)
+    m = re.search(rf"{field}\s*:\s*_dec_\w+\((_init_\w+),\s*(\d+)\)", page)
+    if m:
+        init_name, key = m.group(1), int(m.group(2))
+        arr_m = re.search(rf"{init_name}\s*=\s*\[([^\]]+)\]", page)
+        if arr_m:
+            arr = list(map(int, arr_m.group(1).split(',')))
+            return _xor_decode(arr, key)
+    return None
+
+
 def _fetch_auth_credentials(channel_id):
     """Fetch fresh authToken and channelSalt from the ksohls.ru player page."""
     url = f'https://www.ksohls.ru/premiumtv/daddyhd.php?id={channel_id}'
@@ -94,10 +115,10 @@ def _fetch_auth_credentials(channel_id):
             'User-Agent': _AUTH_UA,
             'Referer': 'https://dlhd.link/',
         }, timeout=15)
-        auth_m = re.search(r"authToken\s*:\s*'([^']+)'", r.text)
-        salt_m = re.search(r"channelSalt\s*:\s*'([^']+)'", r.text)
-        if auth_m and salt_m:
-            return auth_m.group(1), salt_m.group(1)
+        auth_token = _extract_credential(r.text, 'authToken')
+        channel_salt = _extract_credential(r.text, 'channelSalt')
+        if auth_token and channel_salt:
+            return auth_token, channel_salt
         log('[EPlayerAuth] Credentials not found in player page')
     except Exception as e:
         log(f'[EPlayerAuth] fetch error: {e}')
