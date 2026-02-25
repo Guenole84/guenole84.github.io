@@ -393,14 +393,18 @@ def fetch_via_proxy(url, method='get', data=None, headers=None, use_cache=True):
     resp_text = ''
     direct_hdrs = {k: v for k, v in headers.items() if k != 'X-API-Key'}
     for attempt in range(3):
-        try:
-            resp_text = requests.get(url, headers=direct_hdrs, timeout=15).text
-            if not _is_error_response(resp_text):
-                log(f"[fetch_via_proxy] Direct fetch ok attempt={attempt} for {url}")
-                break
-            log(f"[fetch_via_proxy] Bad response attempt={attempt} for {url}: {resp_text[:80]}")
-        except Exception as e:
-            log(f"[fetch_via_proxy] Direct fetch failed attempt={attempt} for {url}: {e}")
+        for verify_ssl in [True, False]:
+            try:
+                resp_text = requests.get(url, headers=direct_hdrs, timeout=15,
+                                         verify=verify_ssl, allow_redirects=True).text
+                if not _is_error_response(resp_text):
+                    log(f"[fetch_via_proxy] ok attempt={attempt} verify={verify_ssl} for {url}")
+                    break
+                log(f"[fetch_via_proxy] bad response verify={verify_ssl}: {resp_text[:80]}")
+            except Exception as e:
+                log(f"[fetch_via_proxy] failed attempt={attempt} verify={verify_ssl} for {url}: {type(e).__name__}: {e}")
+        if not _is_error_response(resp_text):
+            break
         if attempt < 2:
             time.sleep(2)
     if _is_error_response(resp_text):
