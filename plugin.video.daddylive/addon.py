@@ -496,7 +496,7 @@ def get_local_time(utc_time_str):
 def build_url(query):
     return addon_url + '?' + urlencode(query)
 
-def addDir(title, dir_url, is_folder=True, logo=None):
+def addDir(title, dir_url, is_folder=True, logo=None, context_menu=None):
     li = xbmcgui.ListItem(title)
     clean_plot = re.sub(r'<[^>]+>', '', title)
     labels = {'title': title, 'plot': clean_plot, 'mediatype': 'video'}
@@ -508,9 +508,11 @@ def addDir(title, dir_url, is_folder=True, logo=None):
         infotag.setTitle(labels.get("title", "Daddylive"))
         infotag.setPlot(labels.get("plot", labels.get("title", "Daddylive")))
 
-    logo = logo or ICON  
+    logo = logo or ICON
     li.setArt({'thumb': logo, 'poster': logo, 'banner': logo, 'icon': logo, 'fanart': FANART})
     li.setProperty("IsPlayable", 'false' if is_folder else 'true')
+    if context_menu:
+        li.addContextMenuItems(context_menu)
     xbmcplugin.addDirectoryItem(handle=addon_handle, url=dir_url, listitem=li, isFolder=is_folder)
 
 
@@ -527,6 +529,7 @@ def Main_Menu():
     menu = [
         ['[B][COLOR gold]LIVE SPORTS SCHEDULE[/COLOR][/B]', 'sched', None],
         ['[B][COLOR gold]LIVE TV CHANNELS[/COLOR][/B]', 'live_tv', None],
+        ['[B][COLOR gold]FAVORITE LIVE TV CHANNELS[/COLOR][/B]', 'favorites', None],
         ['[B][COLOR gold]EXTRA CHANNELS / VODS[/COLOR][/B]', 'extra_channels',
          'https://images-ext-1.discordapp.net/external/fUzDq2SD022-veHyDJTHKdYTBzD9371EnrUscXXrf0c/%3Fsize%3D4096/https/cdn.discordapp.com/icons/1373713080206495756/1fe97e658bc7fb0e8b9b6df62259c148.png?format=webp&quality=lossless'],
         ['[B][COLOR gold]SEARCH EVENTS SCHEDULE[/COLOR][/B]', 'search', None],
@@ -738,13 +741,54 @@ def getSource(trData):
     except Exception as e:
         log(f'getSource failed: {e}')
 
+def get_favorites():
+    try:
+        return json.loads(addon.getSetting('favorites') or '[]')
+    except:
+        return []
+
+def save_favorites(favs):
+    addon.setSetting('favorites', json.dumps(favs))
+
+def toggle_favorite(cid, name):
+    favs = get_favorites()
+    ids = [f['id'] for f in favs]
+    if cid in ids:
+        favs = [f for f in favs if f['id'] != cid]
+        save_favorites(favs)
+        xbmcgui.Dialog().notification('DaddyLive v3', f'Retiré des favoris : {name}', ICON, 2000)
+    else:
+        favs.append({'id': cid, 'name': name})
+        save_favorites(favs)
+        xbmcgui.Dialog().notification('DaddyLive v3', f'Ajouté aux favoris : {name}', ICON, 2000)
+    xbmc.executebuiltin('Container.Refresh')
+
+def list_favorites():
+    favs = get_favorites()
+    if not favs:
+        xbmcgui.Dialog().notification('DaddyLive v3', 'Aucun favori. Appui long sur une chaîne pour ajouter.', ICON, 3000)
+        closeDir()
+        return
+    fav_ids = {f['id'] for f in favs}
+    for fav in favs:
+        cid = fav['id']
+        name = fav['name']
+        ctx = [('Retirer des favoris', 'RunPlugin(%s)' % build_url({'mode': 'toggle_fav', 'cid': cid, 'name': name}))]
+        addDir(name, build_url({'mode': 'play', 'url': abs_url('watch.php?id=' + cid)}), False, context_menu=ctx)
+    closeDir()
+
 def list_gen():
     chData = channels()
     if not chData:
         xbmcgui.Dialog().notification('DaddyLive v3', 'Impossible de charger les chaînes. Vérifiez votre connexion.', ICON, 5000)
         log('[list_gen] channels() returned empty list')
-    for c in chData:
-        addDir(c[1], build_url({'mode': 'play', 'url': abs_url(c[0])}), False)
+    fav_ids = {f['id'] for f in get_favorites()}
+    for href, name in chData:
+        cid_m = re.search(r'id=(\d+)', href)
+        cid = cid_m.group(1) if cid_m else ''
+        fav_label = '★ Retirer des favoris' if cid in fav_ids else '☆ Ajouter aux favoris'
+        ctx = [(fav_label, 'RunPlugin(%s)' % build_url({'mode': 'toggle_fav', 'cid': cid, 'name': name}))] if cid else []
+        addDir(name, build_url({'mode': 'play', 'url': abs_url(href)}), False, context_menu=ctx)
     closeDir()
 
 def channels():
@@ -1148,6 +1192,8 @@ else:
             Menu_Trans()
         elif servType == 'live_tv':
             list_gen()
+        elif servType == 'favorites':
+            list_favorites()
         elif servType == 'extra_channels':
             ExtraChannels_Main()
         elif servType == 'search':
@@ -1182,6 +1228,9 @@ else:
 
     elif mode == 'diagnostics':
         run_diagnostics()
+
+    elif mode == 'toggle_fav':
+        toggle_favorite(params.get('cid', ''), params.get('name', ''))
 
     elif mode == 'extra_channels':
         ExtraChannels_Main()
