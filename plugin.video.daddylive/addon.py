@@ -442,8 +442,19 @@ def resolve_active_baseurl(seed):
 
 def get_active_base():
     base = addon.getSetting('active_baseurl')
+    if base:
+        # Validate saved URL — if unreachable, fall back to seed
+        try:
+            r = requests.get(base, headers={'User-Agent': UA}, timeout=5,
+                             verify=False, allow_redirects=True)
+            if r.status_code >= 400:
+                raise Exception(f'HTTP {r.status_code}')
+        except Exception as e:
+            log(f'[get_active_base] saved base {base} invalid ({e}), resetting to seed')
+            base = ''
+            addon.setSetting('active_baseurl', '')
     if not base:
-        base = resolve_active_baseurl(SEED_BASEURL)
+        base = normalize_origin(SEED_BASEURL)
         addon.setSetting('active_baseurl', base)
     if not base.endswith('/'):
         base += '/'
