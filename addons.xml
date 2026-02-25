@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <addons>
-<addon id="plugin.video.daddylive" name="DaddyLive v3" version="1.1.0" provider-name="Guenole84">
+<addon id="plugin.video.daddylive" name="DaddyLive v3" version="1.1.1" provider-name="Guenole84">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
         <import addon="script.module.requests" />
@@ -20,7 +20,7 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>v1.1.0: Support DNS personnalise + fix liste vide</news>
+        <news>v1.1.1: Fix credentials obsoletes entre processus + messages d erreur flux</news>
     </extension>
 </addon>
 <addon id="repository.gwen84" name="Gwen84 Repository" version="1.0.0" provider-name="Guenole84">
