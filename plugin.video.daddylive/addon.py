@@ -440,17 +440,22 @@ def resolve_active_baseurl(seed):
         log(f'Active base resolve failed, using seed. Error: {e}')
         return normalize_origin(seed)
 
+_active_base_cache = None
+
 def get_active_base():
+    global _active_base_cache
+    if _active_base_cache:
+        return _active_base_cache
     base = addon.getSetting('active_baseurl')
     if base:
-        # Validate saved URL — if unreachable, fall back to seed
+        # Validate once per process — if unreachable, fall back to seed
         try:
             r = requests.get(base, headers={'User-Agent': UA}, timeout=5,
                              verify=False, allow_redirects=True)
             if r.status_code >= 400:
                 raise Exception(f'HTTP {r.status_code}')
         except Exception as e:
-            log(f'[get_active_base] saved base {base} invalid ({e}), resetting to seed')
+            log(f'[get_active_base] {base} invalide ({e}), reset vers seed')
             base = ''
             addon.setSetting('active_baseurl', '')
     if not base:
@@ -458,6 +463,7 @@ def get_active_base():
         addon.setSetting('active_baseurl', base)
     if not base.endswith('/'):
         base += '/'
+    _active_base_cache = base
     return base
 
 def set_active_base(new_base: str):
