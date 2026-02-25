@@ -27,6 +27,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode, unquote, parse_qsl, quote_plus, urlparse, urljoin
 from datetime import datetime, timezone
 import time
+import calendar
 import xbmc
 import xbmcvfs
 import xbmcgui
@@ -478,17 +479,18 @@ def get_local_time(utc_time_str):
     if not utc_time_str:
         return ''
     try:
-        utc_now = datetime.utcnow()
-        event_time_utc = datetime.strptime(utc_time_str, '%H:%M')
-        event_time_utc = event_time_utc.replace(year=utc_now.year, month=utc_now.month, day=utc_now.day)
-        event_time_utc = event_time_utc.replace(tzinfo=timezone.utc)
-        local_time = event_time_utc.astimezone()
-        # enum: index 0 = 12h (AM/PM), index 1 = 24h
+        # Parse manually — datetime.strptime is None in some Kodi/Python envs (_strptime lazy import bug)
+        h, m = map(int, utc_time_str.strip().split(':'))
+        utc_now = time.gmtime()
+        utc_ts = calendar.timegm((utc_now.tm_year, utc_now.tm_mon, utc_now.tm_mday, h, m, 0, 0, 0, 0))
+        local = time.localtime(utc_ts)
         use_24h = addon.getSetting('time_format') == '1'
         if use_24h:
-            return local_time.strftime('%H:%M')
+            return f'{local.tm_hour:02d}:{local.tm_min:02d}'
         else:
-            return local_time.strftime('%I:%M %p').lstrip('0')
+            period = 'AM' if local.tm_hour < 12 else 'PM'
+            h12 = local.tm_hour % 12 or 12
+            return f'{h12}:{local.tm_min:02d} {period}'
     except Exception as e:
         log(f"Failed to convert time: {e}")
         return utc_time_str or ''
