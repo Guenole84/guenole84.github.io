@@ -23,6 +23,7 @@ import hashlib
 import hmac as _hmac
 import requests
 import threading
+import tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode, unquote, parse_qsl, quote_plus, urlparse, urljoin
 from datetime import datetime, timezone
@@ -115,7 +116,7 @@ def _fetch_auth_credentials(channel_id):
         try:
             r = requests.get(url, headers={
                 'User-Agent': _AUTH_UA,
-                'Referer': 'https://dlhd.link/',
+                'Referer': get_active_base(),
             }, timeout=15)
             auth_token = _extract_credential(r.text, 'authToken')
             channel_salt = _extract_credential(r.text, 'channelSalt')
@@ -129,19 +130,44 @@ def _fetch_auth_credentials(channel_id):
     return None, None
 
 
+def _state_file(channel_key):
+    return os.path.join(tempfile.gettempdir(), f'daddylive_{channel_key}.json')
+
+
 def _set_channel_state(channel_key, auth_token, channel_salt, m3u8_url):
+    state = {
+        'auth_token': auth_token,
+        'channel_salt': channel_salt,
+        'm3u8_url': m3u8_url,
+        'fetched_at': time.time(),
+    }
     with _proxy_lock:
-        _channel_creds[channel_key] = {
-            'auth_token': auth_token,
-            'channel_salt': channel_salt,
-            'm3u8_url': m3u8_url,
-            'fetched_at': time.time(),
-        }
+        _channel_creds[channel_key] = state
+    # Persist to temp file so other plugin processes can read the state
+    try:
+        with open(_state_file(channel_key), 'w') as f:
+            json.dump(state, f)
+    except Exception:
+        pass
 
 
 def _get_channel_state(channel_key):
     with _proxy_lock:
-        return dict(_channel_creds.get(channel_key, {}))
+        state = _channel_creds.get(channel_key)
+    if state:
+        return dict(state)
+    # Cross-process fallback: read from temp file (written by another plugin process)
+    try:
+        path = _state_file(channel_key)
+        if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < 300:
+            with open(path) as f:
+                state = json.load(f)
+            with _proxy_lock:
+                _channel_creds[channel_key] = state
+            return dict(state)
+    except Exception:
+        pass
+    return {}
 
 
 class _EPlayerProxyHandler(BaseHTTPRequestHandler):
@@ -158,6 +184,14 @@ class _EPlayerProxyHandler(BaseHTTPRequestHandler):
         m = re.match(r'^/key/([^/]+)/(\d+)', self.path)
         if m:
             self._handle_key(m.group(1), m.group(2))
+            return
+        m = re.match(r'^/seg/(.+)', self.path)
+        if m:
+            self._handle_segment(m.group(1))
+            return
+        m = re.match(r'^/raw/([^/]+)/(.+)', self.path)
+        if m:
+            self._handle_raw(m.group(1), m.group(2))
             return
         self.send_response(404)
         self.end_headers()
@@ -203,6 +237,19 @@ class _EPlayerProxyHandler(BaseHTTPRequestHandler):
                 return mo.group(0)
 
             content = re.sub(r'URI="([^"]+)"', _rewrite_key, content)
+
+            # Rewrite segment URLs so Kodi fetches them via the proxy
+            # (segments need Origin/Referer headers that Kodi doesn't send)
+            seg_lines = []
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#') and (stripped.startswith('https://') or stripped.startswith('http://')):
+                    encoded = quote_plus(stripped)
+                    seg_lines.append(f'http://127.0.0.1:{port}/seg/{encoded}')
+                else:
+                    seg_lines.append(line)
+            content = '\n'.join(seg_lines)
+
             body = content.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
@@ -256,6 +303,84 @@ class _EPlayerProxyHandler(BaseHTTPRequestHandler):
             log(f'[EPlayerProxy] key error for {channel_key}/{key_id}: {e}')
             self.send_response(502)
             self.end_headers()
+
+    def _handle_raw(self, encoded_origin, encoded_url):
+        """Proxy a URL with a specific Origin/Referer.
+        - m3u8: rewrites relative segment URLs to absolute and routes them through /raw/
+        - segments (.ts): streamed in chunks for low latency
+        """
+        try:
+            origin = unquote(encoded_origin)
+            raw_url = unquote(encoded_url)
+            referer = origin.rstrip('/') + '/'
+            hdrs = {'User-Agent': UA, 'Origin': origin, 'Referer': referer}
+
+            # Decide by URL extension to avoid buffering segments unnecessarily
+            is_manifest = '.m3u8' in raw_url.split('?')[0]
+
+            if is_manifest:
+                r = requests.get(raw_url, headers=hdrs, timeout=15)
+                port = M3U8_PROXY_PORT
+                base = raw_url.split('?')[0].rsplit('/', 1)[0] + '/'
+                enc_orig = quote_plus(origin)
+                seg_lines = []
+                for line in r.text.splitlines():
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith('#'):
+                        abs_seg = stripped if stripped.startswith('http') else urljoin(base, stripped)
+                        seg_lines.append(f'http://127.0.0.1:{port}/raw/{enc_orig}/{quote_plus(abs_seg)}')
+                    else:
+                        seg_lines.append(line)
+                body = '\n'.join(seg_lines).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                # Segment — stream chunks immediately
+                r = requests.get(raw_url, headers=hdrs, timeout=20, stream=True)
+                self.send_response(r.status_code)
+                ct = r.headers.get('Content-Type', 'video/mp2t')
+                self.send_header('Content-Type', ct)
+                cl = r.headers.get('Content-Length')
+                if cl:
+                    self.send_header('Content-Length', cl)
+                self.end_headers()
+                for chunk in r.iter_content(65536):
+                    self.wfile.write(chunk)
+        except Exception as e:
+            log(f'[EPlayerProxy] raw error: {e}')
+            try:
+                self.send_response(502)
+                self.end_headers()
+            except Exception:
+                pass
+
+    def _handle_segment(self, encoded_url):
+        try:
+            seg_url = unquote(encoded_url)
+            r = requests.get(seg_url, headers={
+                'User-Agent': _AUTH_UA,
+                'Referer': PLAYER_REFERER,
+                'Origin': 'https://www.ksohls.ru',
+            }, timeout=20, stream=True)
+            self.send_response(r.status_code)
+            ct = r.headers.get('Content-Type', 'video/mp2t')
+            self.send_header('Content-Type', ct)
+            cl = r.headers.get('Content-Length')
+            if cl:
+                self.send_header('Content-Length', cl)
+            self.end_headers()
+            for chunk in r.iter_content(65536):
+                self.wfile.write(chunk)
+        except Exception as e:
+            log(f'[EPlayerProxy] seg error: {e}')
+            try:
+                self.send_response(502)
+                self.end_headers()
+            except Exception:
+                pass
 
     def do_HEAD(self):
         self.send_response(200)
@@ -581,7 +706,7 @@ def run_diagnostics():
     lines.append('[B]2. Credentials auth[/B]')
     try:
         r2 = requests.get('https://www.ksohls.ru/premiumtv/daddyhd.php?id=51',
-                          headers={'User-Agent': UA, 'Referer': 'https://dlhd.link/'},
+                          headers={'User-Agent': UA, 'Referer': get_active_base()},
                           timeout=10, verify=False)
         has_token = 'authToken' in r2.text
         has_salt = 'channelSalt' in r2.text
@@ -610,8 +735,11 @@ def run_diagnostics():
     lines.append('[B]4. CDN segments TS[/B]')
     if segs:
         try:
-            r4 = requests.get(segs[-1], headers={'User-Agent': UA},
-                              allow_redirects=True, timeout=10, verify=False)
+            r4 = requests.get(segs[-1], headers={
+                                  'User-Agent': UA,
+                                  'Referer': PLAYER_REFERER,
+                                  'Origin': 'https://www.ksohls.ru',
+                              }, allow_redirects=True, timeout=10, verify=False)
             ct = r4.headers.get('Content-Type', '')
             is_html = r4.content[:5] in (b'<!DOC', b'<html') or 'text/html' in ct
             if r4.status_code == 200 and len(r4.content) > 1000 and not is_html:
@@ -627,7 +755,8 @@ def run_diagnostics():
 
     msg = '\n'.join(lines)
     log(f'[Diagnostics]\n{msg}')
-    xbmcgui.Dialog().textviewer('DaddyLive v3 - Diagnostics', msg)
+    version = addon.getAddonInfo('version')
+    xbmcgui.Dialog().textviewer(f'DaddyLive v3 v{version} - Diagnostics', msg)
 
 def getCategTrans():
     schedule_url = abs_url('index.php')
@@ -924,6 +1053,69 @@ def get_player6_stream(channel_id):
         return None
 
 
+def get_stream_page_url(channel_id):
+    """For channels not in the chevy CDN, extract m3u8 via stellarthread player chain.
+    Chain: stream-{id}.php → wikisport.club/court/{fid} → stellarthread.com/wiki.php?live={fid}
+    The md5 token in the URL is IP-based, so it will work from Kodi (same IP as this request).
+    """
+    try:
+        watch_url = abs_url(f'watch.php?id={channel_id}')
+        stream_url_page = abs_url(f'stream/stream-{channel_id}.php')
+
+        # Step 1: fetch the stream page with the correct Referer
+        r = requests.get(stream_url_page, headers={
+            'User-Agent': UA,
+            'Referer': watch_url,
+        }, timeout=12)
+        if r.status_code != 200:
+            log(f'[StreamPage] stream page HTTP {r.status_code} for id={channel_id}')
+            return None
+
+        # Step 2: find wikisport.club iframe src
+        mw = re.search(r'src="(https://wikisport\.club/[^"]+)"', r.text)
+        if not mw:
+            log(f'[StreamPage] no wikisport iframe for id={channel_id}')
+            return None
+        wikisport_url = mw.group(1)
+
+        # Step 3: fetch wikisport page to get fid
+        r2 = requests.get(wikisport_url, headers={
+            'User-Agent': UA,
+            'Referer': stream_url_page,
+        }, timeout=8)
+        mf = re.search(r'fid\s*=\s*"([^"]+)"', r2.text)
+        if not mf:
+            log(f'[StreamPage] no fid in wikisport page')
+            return None
+        fid = mf.group(1)
+
+        # Step 4: fetch stellarthread wiki.php to get the URL
+        stellar_url = f'https://stellarthread.com/wiki.php?player=desktop&live={fid}'
+        r3 = requests.get(stellar_url, headers={
+            'User-Agent': UA,
+            'Referer': wikisport_url,
+        }, timeout=8)
+        if r3.status_code != 200:
+            log(f'[StreamPage] stellarthread HTTP {r3.status_code}')
+            return None
+
+        # Step 5: extract URL from char array in ettgHtplrU() function
+        m3 = re.search(r'return\(\[(.+?)\]\.join\(', r3.text)
+        if not m3:
+            log(f'[StreamPage] no char array found in stellarthread page')
+            return None
+        chars = re.findall(r'"(.*?)"', m3.group(1))
+        m3u8_url = ''.join(chars).replace('\\/', '/')
+
+        if 'm3u8' in m3u8_url and m3u8_url.startswith('https://'):
+            log(f'[StreamPage] Got URL for channel {channel_id}: {m3u8_url[:70]}')
+            return m3u8_url
+        return None
+    except Exception as e:
+        log(f'[StreamPage] Error for channel {channel_id}: {e}')
+        return None
+
+
 def resolve_stream_url(channel_id):
     channel_key = f'premium{channel_id}'
     try:
@@ -969,11 +1161,25 @@ def PlayStream(link):
                 real_m3u8_url = player6_url
                 use_player6 = True
             else:
-                log('[PlayStream] Player 6 fallback unavailable, using primary anyway')
+                log('[PlayStream] Player 6 unavailable, trying stream page fallback')
+                sp_url = get_stream_page_url(channel_id)
+                if sp_url:
+                    log(f'[PlayStream] Stream page fallback URL: {sp_url[:70]}')
+                    real_m3u8_url = sp_url
+                    use_player6 = True
+                else:
+                    log('[PlayStream] All fallbacks failed, using primary CDN anyway')
 
         if use_player6:
-            # Player 6 streams don't use DaddyLive auth proxy
-            m3u8_url = real_m3u8_url
+            # stellarthread/sanwalyaarpya streams require Origin header — proxy via /raw/
+            if 'sanwalyaarpya.com' in real_m3u8_url:
+                _ensure_m3u8_proxy()
+                encoded_origin = quote_plus('https://stellarthread.com')
+                encoded_url = quote_plus(real_m3u8_url)
+                m3u8_url = f'http://127.0.0.1:{M3U8_PROXY_PORT}/raw/{encoded_origin}/{encoded_url}'
+                log(f'[PlayStream] Using raw proxy for stellarthread stream')
+            else:
+                m3u8_url = real_m3u8_url
             log('[PlayStream] Using Player 6 stream directly')
         else:
             # Fetch fresh auth credentials from the DaddyLive player page
