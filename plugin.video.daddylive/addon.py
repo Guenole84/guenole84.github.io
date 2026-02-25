@@ -516,12 +516,60 @@ def Main_Menu():
         ['[B][COLOR gold]SEARCH LIVE TV CHANNELS[/COLOR][/B]', 'search_channels', None],
         ['[B][COLOR gold]REFRESH CATEGORIES[/COLOR][/B]', 'refresh_sched', None],
         ['[B][COLOR gold]SET ACTIVE DOMAIN (AUTO)[/COLOR][/B]', 'resolve_base_now', None],
+        ['[B][COLOR red]DIAGNOSTICS[/COLOR][/B]', 'diagnostics', None],
     ]
 
     for title, mode_name, logo in menu:
         addDir(title, build_url({'mode': 'menu', 'serv_type': mode_name}), True, logo=logo)
 
     closeDir()
+
+
+def run_diagnostics():
+    lines = []
+    UA_diag = UA
+
+    # 1. dlhd.link
+    url = abs_url('24-7-channels.php')
+    lines.append(f'URL: {url}')
+    for verify_ssl in [True, False]:
+        try:
+            r = requests.get(url, headers={'User-Agent': UA_diag}, timeout=10,
+                             verify=verify_ssl, allow_redirects=True)
+            cards = len(re.findall(r'class="card"', r.text))
+            lines.append(f'dlhd.link verify={verify_ssl}: HTTP {r.status_code} len={len(r.text)} cards={cards}')
+            if cards > 0:
+                break
+        except Exception as e:
+            lines.append(f'dlhd.link verify={verify_ssl}: ERREUR {type(e).__name__}: {str(e)[:80]}')
+
+    # 2. ksohls.ru credentials
+    try:
+        r2 = requests.get('https://www.ksohls.ru/premiumtv/daddyhd.php?id=51',
+                          headers={'User-Agent': UA_diag, 'Referer': 'https://dlhd.link/'},
+                          timeout=10, verify=False)
+        has_token = 'authToken' in r2.text
+        has_salt = 'channelSalt' in r2.text
+        lines.append(f'ksohls.ru: HTTP {r2.status_code} authToken={has_token} channelSalt={has_salt}')
+    except Exception as e:
+        lines.append(f'ksohls.ru: ERREUR {type(e).__name__}: {str(e)[:80]}')
+
+    # 3. chevy CDN
+    try:
+        r3 = requests.get('https://chevy.adsfadfds.cfd/proxy/zeko/premium51/mono.css',
+                          headers={'User-Agent': UA_diag}, timeout=10, verify=False)
+        segs = [l for l in r3.text.splitlines() if l and not l.startswith('#')]
+        lines.append(f'CDN m3u8: HTTP {r3.status_code} segments={len(segs)}')
+        if segs:
+            r4 = requests.get(segs[-1], headers={'User-Agent': UA_diag},
+                              allow_redirects=True, timeout=10, verify=False)
+            lines.append(f'CDN segment: HTTP {r4.status_code} size={len(r4.content)}B')
+    except Exception as e:
+        lines.append(f'CDN: ERREUR {type(e).__name__}: {str(e)[:80]}')
+
+    msg = '\n'.join(lines)
+    log(f'[Diagnostics]\n{msg}')
+    xbmcgui.Dialog().textviewer('DaddyLive v3 - Diagnostics', msg)
 
 def getCategTrans():
     schedule_url = abs_url('index.php')
@@ -1082,6 +1130,9 @@ else:
 
     elif mode == 'resolve_base_now':
         refresh_active_base()
+
+    elif mode == 'diagnostics':
+        run_diagnostics()
 
     elif mode == 'extra_channels':
         ExtraChannels_Main()
