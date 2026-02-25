@@ -32,7 +32,7 @@ def get_version(addon_id):
 
 def build_addons_xml():
     addons_xml = '<?xml version="1.0" encoding="UTF-8"?>\n<addons>\n'
-    for addon_id in ['plugin.video.daddylive', 'repository.daddylive']:
+    for addon_id in ['plugin.video.daddylive', 'repository.gwen84']:
         with open(f'{addon_id}/addon.xml', 'r', encoding='utf-8') as f:
             content = f.read()
         start = content.find('<addon ')
@@ -48,7 +48,7 @@ def build_addons_xml():
 
 if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    for addon_id in ['plugin.video.daddylive', 'repository.daddylive']:
+    for addon_id in ['plugin.video.daddylive', 'repository.gwen84']:
         v = get_version(addon_id)
         print(f'Packaging {addon_id} v{v}...')
         make_zip(addon_id, v)
