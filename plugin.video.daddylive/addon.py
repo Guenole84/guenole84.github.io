@@ -483,8 +483,9 @@ def get_local_time(utc_time_str):
         event_time_utc = event_time_utc.replace(year=utc_now.year, month=utc_now.month, day=utc_now.day)
         event_time_utc = event_time_utc.replace(tzinfo=timezone.utc)
         local_time = event_time_utc.astimezone()
-        time_format_pref = addon.getSetting('time_format')
-        if time_format_pref == '1':
+        # enum: index 0 = 12h (AM/PM), index 1 = 24h
+        use_24h = addon.getSetting('time_format') == '1'
+        if use_24h:
             return local_time.strftime('%H:%M')
         else:
             return local_time.strftime('%I:%M %p').lstrip('0')
