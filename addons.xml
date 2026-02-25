@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <addons>
-<addon id="plugin.video.daddylive" name="DaddyLive v3" version="1.0.10" provider-name="Guenole84">
+<addon id="plugin.video.daddylive" name="DaddyLive v3" version="1.0.11" provider-name="Guenole84">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
         <import addon="script.module.requests" />
@@ -20,7 +20,7 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>v1.0.10: Fix segment proxy with Origin header + stellarthread/sanwalyaarpya CDN support</news>
+        <news>v1.0.11: Custom DNS server support to bypass ISP-level DNS blocks</news>
     </extension>
 </addon>
 <addon id="repository.gwen84" name="Gwen84 Repository" version="1.0.0" provider-name="Guenole84">
