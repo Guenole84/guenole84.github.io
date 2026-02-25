@@ -540,6 +540,7 @@ def Main_Menu():
         ['[B][COLOR gold]REFRESH CATEGORIES[/COLOR][/B]', 'refresh_sched', None],
         ['[B][COLOR gold]SET ACTIVE DOMAIN (AUTO)[/COLOR][/B]', 'resolve_base_now', None],
         ['[B][COLOR red]DIAGNOSTICS[/COLOR][/B]', 'diagnostics', None],
+        ['[B][COLOR cyan]DADDYLIVE CHAT[/COLOR][/B]', 'chat', None],
     ]
 
     for title, mode_name, logo in menu:
@@ -611,8 +612,12 @@ def run_diagnostics():
         try:
             r4 = requests.get(segs[-1], headers={'User-Agent': UA},
                               allow_redirects=True, timeout=10, verify=False)
-            if r4.status_code == 200 and len(r4.content) > 1000:
-                lines.append(ok(f'HTTP {r4.status_code} — {len(r4.content)} octets'))
+            ct = r4.headers.get('Content-Type', '')
+            is_html = r4.content[:5] in (b'<!DOC', b'<html') or 'text/html' in ct
+            if r4.status_code == 200 and len(r4.content) > 1000 and not is_html:
+                lines.append(ok(f'HTTP {r4.status_code} — {len(r4.content)} octets — video OK'))
+            elif r4.status_code == 200 and is_html:
+                lines.append(ko(f'HTTP {r4.status_code} — page HTML ({len(r4.content)}o) — CDN en panne'))
             else:
                 lines.append(ko(f'HTTP {r4.status_code} — {len(r4.content)} octets'))
         except Exception as e:
@@ -837,6 +842,88 @@ def show_adult():
     """Return True if adult content is enabled in settings"""
     return addon.getSettingBool('show_adult')
 
+def _probe_hls_url(url):
+    """Quick check: returns True if URL responds with valid HLS content."""
+    try:
+        r = requests.get(url, headers={'User-Agent': UA}, timeout=5, stream=True)
+        if r.status_code != 200:
+            return False
+        chunk = next(r.iter_content(512), b'')
+        r.close()
+        # HTML page = CDN down; real HLS starts with #EXTM3U
+        if chunk[:5] in (b'<!DOC', b'<html', b'<!doc'):
+            return False
+        if b'#EXTM3U' in chunk:
+            return True
+        # Some proxies return binary content without #EXTM3U header in first chunk
+        return len(chunk) > 0 and b'<' not in chunk[:20]
+    except Exception:
+        return False
+
+
+def get_player6_stream(channel_id):
+    """Fetch fallback stream URL from Player 6 (tv-bu1.blogspot.com).
+    Returns a direct HLS URL or None if unavailable."""
+    try:
+        blogspot_url = f'https://tv-bu1.blogspot.com/p/e1.html?id={channel_id}a'
+        log(f'[Player6] Fetching: {blogspot_url}')
+        r = requests.get(blogspot_url, headers={'User-Agent': UA}, timeout=10)
+        if r.status_code != 200:
+            log(f'[Player6] HTTP {r.status_code}')
+            return None
+        html_page = r.text
+
+        # Find the iframe src injected for this channel id
+        m = re.search(
+            r'id\s*===\s*"' + re.escape(str(channel_id)) + r'a"[^<]{0,600}'
+            r'<iframe[^>]+src="([^"]+)"',
+            html_page, re.DOTALL
+        )
+        if not m:
+            log(f'[Player6] No entry for channel {channel_id}a')
+            return None
+
+        iframe_src = m.group(1)
+        log(f'[Player6] iframe src: {iframe_src}')
+
+        # Case 1: r-strm.blogspot.com with ?s=<direct_url> parameter
+        ms = re.search(r'[?&]s=(https?://[^&"\'>\s]+)', iframe_src)
+        if ms:
+            stream_url = ms.group(1)
+            log(f'[Player6] Direct URL from ?s= param: {stream_url}')
+            return stream_url
+
+        # Case 2: hoofoot.ru — JW Player page with file: "..." URL
+        if 'hoofoot.ru' in iframe_src:
+            r2 = requests.get(iframe_src, headers={'User-Agent': UA}, timeout=8)
+            mf = re.search(r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']', r2.text)
+            if mf:
+                stream_url = mf.group(1)
+                log(f'[Player6] hoofoot.ru stream: {stream_url}')
+                return stream_url
+
+        # Case 3: r-strm.blogspot.com sub-page — fetch and extract JW Player or iframe
+        if 'r-strm.blogspot.com' in iframe_src:
+            r2 = requests.get(iframe_src, headers={'User-Agent': UA}, timeout=8)
+            # JW Player file
+            mf = re.search(r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']', r2.text)
+            if mf:
+                return mf.group(1)
+            # Inner iframe with ?s= param
+            mi = re.search(r'<iframe[^>]+src="([^"]*[?&]s=https?://[^"]+)"', r2.text)
+            if mi:
+                ms2 = re.search(r'[?&]s=(https?://[^&"\'>\s]+)', mi.group(1))
+                if ms2:
+                    return ms2.group(1)
+
+        log(f'[Player6] Could not extract direct URL from {iframe_src}')
+        return None
+
+    except Exception as e:
+        log(f'[Player6] Error for channel {channel_id}: {e}')
+        return None
+
+
 def resolve_stream_url(channel_id):
     channel_key = f'premium{channel_id}'
     try:
@@ -868,21 +955,38 @@ def PlayStream(link):
         log(f'[PlayStream] Channel ID: {channel_id}')
         channel_key = f'premium{channel_id}'
 
-        # Resolve real m3u8 URL first
+        # Resolve primary m3u8 URL from DaddyLive CDN
         real_m3u8_url = resolve_stream_url(channel_id)
-        log(f'[PlayStream] Real M3U8 URL: {real_m3u8_url}')
+        log(f'[PlayStream] Primary M3U8 URL: {real_m3u8_url}')
 
-        # Fetch fresh auth credentials from the player page
-        auth_token, channel_salt = _fetch_auth_credentials(channel_id)
-        if auth_token and channel_salt:
-            log(f'[PlayStream] Got auth credentials for {channel_key}')
-            _set_channel_state(channel_key, auth_token, channel_salt, real_m3u8_url)
-            _ensure_m3u8_proxy()
-            m3u8_url = f'http://127.0.0.1:{M3U8_PROXY_PORT}/m3u8/{channel_key}'
-            log(f'[PlayStream] Using auth proxy: {m3u8_url}')
-        else:
-            log('[PlayStream] Auth credentials unavailable, falling back to direct URL')
+        # Probe primary CDN — if it's down (returns HTML), try Player 6 fallback
+        use_player6 = False
+        if not _probe_hls_url(real_m3u8_url):
+            log('[PlayStream] Primary CDN probe failed, trying Player 6 fallback')
+            player6_url = get_player6_stream(channel_id)
+            if player6_url:
+                log(f'[PlayStream] Player 6 fallback URL: {player6_url}')
+                real_m3u8_url = player6_url
+                use_player6 = True
+            else:
+                log('[PlayStream] Player 6 fallback unavailable, using primary anyway')
+
+        if use_player6:
+            # Player 6 streams don't use DaddyLive auth proxy
             m3u8_url = real_m3u8_url
+            log('[PlayStream] Using Player 6 stream directly')
+        else:
+            # Fetch fresh auth credentials from the DaddyLive player page
+            auth_token, channel_salt = _fetch_auth_credentials(channel_id)
+            if auth_token and channel_salt:
+                log(f'[PlayStream] Got auth credentials for {channel_key}')
+                _set_channel_state(channel_key, auth_token, channel_salt, real_m3u8_url)
+                _ensure_m3u8_proxy()
+                m3u8_url = f'http://127.0.0.1:{M3U8_PROXY_PORT}/m3u8/{channel_key}'
+                log(f'[PlayStream] Using auth proxy: {m3u8_url}')
+            else:
+                log('[PlayStream] Auth credentials unavailable, falling back to direct URL')
+                m3u8_url = real_m3u8_url
 
         liz = xbmcgui.ListItem(f'Channel {channel_id}', path=m3u8_url)
         liz.setContentLookup(False)
@@ -892,7 +996,7 @@ def PlayStream(link):
         liz.setProperty('IsPlayable', 'true')
 
         xbmcplugin.setResolvedUrl(addon_handle, True, liz)
-        log('[PlayStream] Stream started')
+        log(f'[PlayStream] Stream started ({"Player6" if use_player6 else "primary CDN"})')
 
     except Exception as e:
         log(f'[PlayStream] Error: {e}')
@@ -1207,6 +1311,9 @@ else:
             xbmc.executebuiltin('Container.Refresh')
         elif servType == 'diagnostics':
             run_diagnostics()
+        elif servType == 'chat':
+            import webbrowser
+            webbrowser.open('https://daddylivehd.chatango.com/')
 
     elif mode == 'showChannels':
         transType = params.get('trType')
