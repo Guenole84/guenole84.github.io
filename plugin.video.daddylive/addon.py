@@ -526,46 +526,76 @@ def Main_Menu():
 
 
 def run_diagnostics():
-    lines = []
-    UA_diag = UA
+    def ok(text):
+        return f'[COLOR lime][OK][/COLOR] {text}'
+    def ko(text):
+        return f'[COLOR red][KO][/COLOR] {text}'
 
-    # 1. dlhd.link
+    lines = []
+
+    # 1. dlhd.link channels
     url = abs_url('24-7-channels.php')
-    lines.append(f'URL: {url}')
+    lines.append(f'[B]1. Liste des chaines[/B]  ({url})')
+    fetched = False
     for verify_ssl in [True, False]:
         try:
-            r = requests.get(url, headers={'User-Agent': UA_diag}, timeout=10,
+            r = requests.get(url, headers={'User-Agent': UA}, timeout=10,
                              verify=verify_ssl, allow_redirects=True)
             cards = len(re.findall(r'class="card"', r.text))
-            lines.append(f'dlhd.link verify={verify_ssl}: HTTP {r.status_code} len={len(r.text)} cards={cards}')
             if cards > 0:
+                lines.append(ok(f'HTTP {r.status_code} — {cards} chaines trouvees'))
+                fetched = True
                 break
+            else:
+                lines.append(ko(f'HTTP {r.status_code} — 0 chaines (verify={verify_ssl})'))
         except Exception as e:
-            lines.append(f'dlhd.link verify={verify_ssl}: ERREUR {type(e).__name__}: {str(e)[:80]}')
+            lines.append(ko(f'verify={verify_ssl}: {type(e).__name__}: {str(e)[:80]}'))
+    if not fetched:
+        lines.append(ko('Echec du chargement des chaines'))
 
     # 2. ksohls.ru credentials
+    lines.append('[B]2. Credentials auth[/B]')
     try:
         r2 = requests.get('https://www.ksohls.ru/premiumtv/daddyhd.php?id=51',
-                          headers={'User-Agent': UA_diag, 'Referer': 'https://dlhd.link/'},
+                          headers={'User-Agent': UA, 'Referer': 'https://dlhd.link/'},
                           timeout=10, verify=False)
         has_token = 'authToken' in r2.text
         has_salt = 'channelSalt' in r2.text
-        lines.append(f'ksohls.ru: HTTP {r2.status_code} authToken={has_token} channelSalt={has_salt}')
+        if has_token and has_salt:
+            lines.append(ok(f'HTTP {r2.status_code} — authToken + channelSalt OK'))
+        else:
+            lines.append(ko(f'HTTP {r2.status_code} — authToken={has_token} channelSalt={has_salt}'))
     except Exception as e:
-        lines.append(f'ksohls.ru: ERREUR {type(e).__name__}: {str(e)[:80]}')
+        lines.append(ko(f'{type(e).__name__}: {str(e)[:80]}'))
 
-    # 3. chevy CDN
+    # 3. CDN m3u8
+    lines.append('[B]3. CDN m3u8[/B]')
+    segs = []
     try:
         r3 = requests.get('https://chevy.adsfadfds.cfd/proxy/zeko/premium51/mono.css',
-                          headers={'User-Agent': UA_diag}, timeout=10, verify=False)
+                          headers={'User-Agent': UA}, timeout=10, verify=False)
         segs = [l for l in r3.text.splitlines() if l and not l.startswith('#')]
-        lines.append(f'CDN m3u8: HTTP {r3.status_code} segments={len(segs)}')
-        if segs:
-            r4 = requests.get(segs[-1], headers={'User-Agent': UA_diag},
-                              allow_redirects=True, timeout=10, verify=False)
-            lines.append(f'CDN segment: HTTP {r4.status_code} size={len(r4.content)}B')
+        if r3.status_code == 200 and segs:
+            lines.append(ok(f'HTTP {r3.status_code} — {len(segs)} segments'))
+        else:
+            lines.append(ko(f'HTTP {r3.status_code} — {len(segs)} segments'))
     except Exception as e:
-        lines.append(f'CDN: ERREUR {type(e).__name__}: {str(e)[:80]}')
+        lines.append(ko(f'{type(e).__name__}: {str(e)[:80]}'))
+
+    # 4. CDN segments
+    lines.append('[B]4. CDN segments TS[/B]')
+    if segs:
+        try:
+            r4 = requests.get(segs[-1], headers={'User-Agent': UA},
+                              allow_redirects=True, timeout=10, verify=False)
+            if r4.status_code == 200 and len(r4.content) > 1000:
+                lines.append(ok(f'HTTP {r4.status_code} — {len(r4.content)} octets'))
+            else:
+                lines.append(ko(f'HTTP {r4.status_code} — {len(r4.content)} octets'))
+        except Exception as e:
+            lines.append(ko(f'{type(e).__name__}: {str(e)[:80]}'))
+    else:
+        lines.append(ko('Pas de segments a tester'))
 
     msg = '\n'.join(lines)
     log(f'[Diagnostics]\n{msg}')
@@ -1109,6 +1139,8 @@ else:
             Search_Channels()
         elif servType == 'refresh_sched':
             xbmc.executebuiltin('Container.Refresh')
+        elif servType == 'diagnostics':
+            run_diagnostics()
 
     elif mode == 'showChannels':
         transType = params.get('trType')
